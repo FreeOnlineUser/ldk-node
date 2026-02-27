@@ -1351,7 +1351,7 @@ fn build_with_store_internal(
 		},
 	};
 
-	let persister = Arc::new(Persister::new(
+	let inner_persister = Arc::new(Persister::new(
 		Arc::clone(&kv_store),
 		Arc::clone(&logger),
 		PERSISTER_MAX_PENDING_UPDATES,
@@ -1359,6 +1359,13 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
+	));
+
+	// Wrap persister with watchtower interceptor to capture counterparty
+	// commitment data on every state update (for LND watchtower bridge).
+	let persister = Arc::new(crate::watchtower::WatchtowerPersister::new(
+		inner_persister,
+		Arc::clone(&logger),
 	));
 
 	// Initialize the ChainMonitor
@@ -1815,6 +1822,7 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver,
+		watchtower_updates: persister.update_store(),
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})

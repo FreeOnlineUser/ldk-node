@@ -228,6 +228,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: Arc<HRNResolver>,
+	watchtower_updates: Arc<Mutex<watchtower::WatchtowerUpdateStore>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -1733,13 +1734,24 @@ impl Node {
 		watchtower::export_monitors(&self.chain_monitor, &self.logger)
 	}
 
-	/// Extracts watchtower-relevant justice data from all active channel monitors.
+	/// Drains all pending watchtower updates captured since the last call.
 	///
-	/// Returns counterparty commitment transaction data that can be used to
-	/// construct LND-compatible watchtower justice blobs. Each entry contains
-	/// the serialized commitment transaction and its commitment number.
-	pub fn watchtower_extract_justice_data(&self) -> Vec<watchtower::WatchtowerUpdate> {
-		watchtower::extract_justice_data(&self.chain_monitor, &self.logger)
+	/// Each update contains a counterparty commitment transaction and its
+	/// commitment number, captured in real-time during channel state changes.
+	/// These are the raw materials for building LND-compatible watchtower
+	/// justice blobs.
+	///
+	/// Call this periodically (e.g., after each payment) and push the results
+	/// to your watchtower. The updates are removed from the internal store
+	/// after this call.
+	pub fn watchtower_drain_updates(&self) -> Vec<watchtower::WatchtowerUpdate> {
+		match self.watchtower_updates.lock() {
+			Ok(mut store) => store.drain(),
+			Err(_) => {
+				log_error!(self.logger, "Watchtower update store lock poisoned");
+				Vec::new()
+			}
+		}
 	}
 
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
