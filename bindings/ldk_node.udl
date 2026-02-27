@@ -197,6 +197,9 @@ interface Node {
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	[Throws=NodeError]
 	bytes export_pathfinding_scores();
+	sequence<WatchtowerMonitorInfo> watchtower_list_monitors();
+	[Throws=NodeError]
+	sequence<WatchtowerMonitorData> watchtower_export_monitors();
 };
 
 [Enum]
@@ -303,6 +306,20 @@ interface LSPS1Liquidity {
 	LSPS1OrderStatus request_channel(u64 lsp_balance_sat, u64 client_balance_sat, u32 channel_expiry_blocks, boolean announce_channel);
 	[Throws=NodeError]
 	LSPS1OrderStatus check_order_status(LSPS1OrderId order_id);
+};
+
+dictionary WatchtowerMonitorInfo {
+	string channel_id;
+	string counterparty_node_id;
+	u64 latest_update_id;
+	string funding_txo;
+};
+
+dictionary WatchtowerMonitorData {
+	string channel_id;
+	string counterparty_node_id;
+	u64 latest_update_id;
+	bytes monitor_bytes;
 };
 
 [Error]
