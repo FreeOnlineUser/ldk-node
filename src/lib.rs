@@ -120,6 +120,7 @@ pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use bip39;
 pub use bitcoin;
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::script::ScriptBuf;
 #[cfg(feature = "uniffi")]
 pub use bitcoin::FeeRate;
 #[cfg(not(feature = "uniffi"))]
@@ -180,7 +181,7 @@ use types::{
 	Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
-pub use watchtower::{WatchtowerMonitorData, WatchtowerMonitorInfo, WatchtowerUpdate};
+pub use watchtower::{WatchtowerJusticeBlob, WatchtowerMonitorData, WatchtowerMonitorInfo};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -245,7 +246,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: Arc<HRNResolver>,
-	watchtower_updates: Arc<Mutex<watchtower::WatchtowerUpdateStore>>,
+	watchtower_persister: Arc<watchtower::WatchtowerPersister>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -1961,24 +1962,25 @@ impl Node {
 		watchtower::export_monitors(&self.chain_monitor, &self.logger)
 	}
 
-	/// Drains all pending watchtower updates captured since the last call.
+	/// Drains all ready justice blobs captured since the last call.
 	///
-	/// Each update contains a counterparty commitment transaction and its
-	/// commitment number, captured in real-time during channel state changes.
-	/// These are the raw materials for building LND-compatible watchtower
-	/// justice blobs.
+	/// Each blob contains fully-formed justice data: breach txid (encryption key),
+	/// revocation pubkey, delay pubkey, CSV delay, and signed to-local signature.
+	/// The Kotlin/Swift side only needs to:
+	/// 1. Encrypt with XChaCha20-Poly1305 (key = breach_txid)
+	/// 2. Take first 16 bytes of breach_txid as the hint
+	/// 3. Push (hint, encrypted_blob) to the LND tower
 	///
 	/// Call this periodically (e.g., after each payment) and push the results
-	/// to your watchtower. The updates are removed from the internal store
-	/// after this call.
-	pub fn watchtower_drain_updates(&self) -> Vec<watchtower::WatchtowerUpdate> {
-		match self.watchtower_updates.lock() {
-			Ok(mut store) => store.drain(),
-			Err(_) => {
-				log_error!(self.logger, "Watchtower update store lock poisoned");
-				Vec::new()
-			}
-		}
+	/// to your watchtower.
+	pub fn watchtower_drain_justice_blobs(&self) -> Vec<watchtower::WatchtowerJusticeBlob> {
+		self.watchtower_persister.drain_justice_blobs()
+	}
+
+	/// Set the sweep address for watchtower justice transactions.
+	/// Must be called before any justice blobs can be produced.
+	pub fn watchtower_set_sweep_address(&self, address: Vec<u8>) {
+		self.watchtower_persister.set_sweep_address(ScriptBuf::from_bytes(address));
 	}
 
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have

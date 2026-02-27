@@ -141,7 +141,8 @@ interface Node {
 	sequence<WatchtowerMonitorInfo> watchtower_list_monitors();
 	[Throws=NodeError]
 	sequence<WatchtowerMonitorData> watchtower_export_monitors();
-	sequence<WatchtowerUpdate> watchtower_drain_updates();
+	sequence<WatchtowerJusticeBlob> watchtower_drain_justice_blobs();
+	void watchtower_set_sweep_address(bytes address);
 };
 
 typedef interface Bolt11Payment;
@@ -181,11 +182,16 @@ dictionary WatchtowerMonitorData {
 	bytes monitor_bytes;
 };
 
-dictionary WatchtowerUpdate {
+dictionary WatchtowerJusticeBlob {
 	string channel_id;
-	bytes commitment_tx_bytes;
-	u64 commitment_number;
-	u64 update_id;
+	bytes breach_txid;
+	bytes sweep_address;
+	bytes revocation_pubkey;
+	bytes local_delay_pubkey;
+	u32 csv_delay;
+	bytes to_local_sig;
+	bytes to_remote_pubkey;
+	bytes to_remote_sig;
 };
 
 [Error]

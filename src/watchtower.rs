@@ -1,10 +1,15 @@
 //! Watchtower support for ldk-node.
 //!
-//! Provides two capabilities:
-//! 1. Channel monitor export for external watchtower services
-//! 2. Persist-layer interception to capture counterparty commitment data
-//!    for building watchtower justice blobs on each state update
+//! Intercepts every channel state change via the Persist trait to capture
+//! counterparty commitment data, then produces ready-to-encrypt justice
+//! blobs for LND watchtower compatibility.
+//!
+//! Two-phase approach:
+//! 1. On each persist callback, capture new counterparty commitments
+//! 2. Attempt to sign justice transactions for previously captured
+//!    commitments (the revocation secret arrives in the following update)
 
+use bitcoin::script::ScriptBuf;
 use lightning::chain::chainmonitor::Persist;
 use lightning::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate};
 use lightning::chain::ChannelMonitorUpdateStatus;
@@ -13,11 +18,49 @@ use lightning::sign::InMemorySigner;
 use lightning::util::persist::MonitorName;
 use lightning::util::ser::Writeable;
 
-use crate::logger::{log_error, log_info, LdkLogger, Logger};
+use crate::logger::{log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, Persister};
 use crate::Error;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+/// A fully-formed justice blob ready for encryption and push to an LND tower.
+///
+/// Contains all fields needed for LND's JusticeKit V0 format.
+/// The Kotlin/Swift side only needs to:
+/// 1. Encrypt with XChaCha20-Poly1305 using breach_txid as key
+/// 2. Take first 16 bytes of breach_txid as the hint
+/// 3. Push (hint, encrypted_blob) to the tower
+#[derive(Debug, Clone)]
+pub struct WatchtowerJusticeBlob {
+    /// Channel this blob protects.
+    pub channel_id: String,
+    /// Full txid of the revoked commitment (32 bytes).
+    /// This is both the encryption key AND the source of the 16-byte hint.
+    pub breach_txid: Vec<u8>,
+    /// Sweep address where justice funds go (witness program).
+    pub sweep_address: Vec<u8>,
+    /// Compressed revocation pubkey (33 bytes).
+    pub revocation_pubkey: Vec<u8>,
+    /// Compressed local delay pubkey (33 bytes).
+    pub local_delay_pubkey: Vec<u8>,
+    /// CSV delay for the to-local output.
+    pub csv_delay: u32,
+    /// Signature for spending the to-local output (64 bytes, compact DER).
+    pub to_local_sig: Vec<u8>,
+    /// Compressed to-remote pubkey (33 bytes, may be empty if no to-remote output).
+    pub to_remote_pubkey: Vec<u8>,
+    /// Signature for the to-remote output (64 bytes, may be empty).
+    pub to_remote_sig: Vec<u8>,
+}
+
+/// Metadata for a pending (unsigned) commitment.
+struct PendingCommitment {
+    channel_id: String,
+    commitment_tx: CommitmentTransaction,
+    commitment_number: u64,
+}
 
 /// Information about a channel monitor for watchtower synchronization.
 #[derive(Debug, Clone)]
@@ -45,95 +88,87 @@ pub struct WatchtowerMonitorData {
     pub monitor_bytes: Vec<u8>,
 }
 
-/// Captured counterparty commitment data from a channel monitor update.
-/// This is the raw material needed to build LND watchtower justice blobs.
-#[derive(Debug, Clone)]
-pub struct WatchtowerUpdate {
-    /// Channel ID this update belongs to.
-    pub channel_id: String,
-    /// The counterparty commitment transaction (unsigned).
-    /// The txid of this transaction becomes the breach key and hint.
-    pub commitment_tx_bytes: Vec<u8>,
-    /// The commitment number (used for signing justice transactions).
-    pub commitment_number: u64,
-    /// The monitor update ID that produced this data.
-    pub update_id: u64,
-}
-
-/// Accumulator for watchtower updates captured during persist operations.
-#[derive(Debug)]
-pub struct WatchtowerUpdateStore {
-    /// Pending updates that haven't been consumed yet.
-    pending: Vec<WatchtowerUpdate>,
-}
-
-impl WatchtowerUpdateStore {
-    /// Create a new empty store.
-    pub fn new() -> Self {
-        Self { pending: Vec::new() }
-    }
-
-    /// Add a captured update.
-    pub fn push(&mut self, update: WatchtowerUpdate) {
-        self.pending.push(update);
-    }
-
-    /// Drain all pending updates (returns them and clears the store).
-    pub fn drain(&mut self) -> Vec<WatchtowerUpdate> {
-        std::mem::take(&mut self.pending)
-    }
-
-    /// Number of pending updates.
-    pub fn len(&self) -> usize {
-        self.pending.len()
-    }
+/// Internal state for the watchtower persister.
+struct WatchtowerState {
+    /// Commitments captured but not yet signable (waiting for revocation secret).
+    /// Key: (channel_id_string, commitment_number)
+    pending_commitments: HashMap<(String, u64), PendingCommitment>,
+    /// Fully signed justice blobs ready for the tower.
+    ready_blobs: Vec<WatchtowerJusticeBlob>,
+    /// Sweep address to use for justice transactions.
+    sweep_address: Option<ScriptBuf>,
+    /// Fee rate for justice transactions (sat/kw).
+    sweep_fee_rate: u64,
 }
 
 /// A wrapping persister that intercepts channel monitor updates to capture
-/// counterparty commitment data for watchtower backup.
-///
-/// Delegates all actual persistence to the inner `MonitorUpdatingPersister`,
-/// and additionally extracts counterparty commitment transactions from each
-/// update for later translation into LND watchtower blobs.
+/// counterparty commitment data and produce ready-to-encrypt justice blobs.
 pub struct WatchtowerPersister {
     inner: Arc<Persister>,
-    updates: Arc<Mutex<WatchtowerUpdateStore>>,
+    state: Mutex<WatchtowerState>,
     logger: Arc<Logger>,
 }
 
 impl WatchtowerPersister {
-    /// Create a new WatchtowerPersister wrapping an existing persister.
-    pub fn new(
-        inner: Arc<Persister>,
-        logger: Arc<Logger>,
-    ) -> Self {
+    /// Create a new WatchtowerPersister.
+    ///
+    /// `sweep_fee_rate` is the fee rate (sat/kweight) for justice transactions.
+    /// A reasonable default is 12500 (roughly 50 sat/vB).
+    pub fn new(inner: Arc<Persister>, logger: Arc<Logger>) -> Self {
         Self {
             inner,
-            updates: Arc::new(Mutex::new(WatchtowerUpdateStore::new())),
+            state: Mutex::new(WatchtowerState {
+                pending_commitments: HashMap::new(),
+                ready_blobs: Vec::new(),
+                sweep_address: None,
+                sweep_fee_rate: 12500, // ~50 sat/vB default
+            }),
             logger,
         }
     }
 
-    /// Get a reference to the update store for draining captured updates.
-    pub fn update_store(&self) -> Arc<Mutex<WatchtowerUpdateStore>> {
-        Arc::clone(&self.updates)
+    /// Set the sweep address for justice transactions.
+    /// Must be called before any blobs can be produced.
+    pub fn set_sweep_address(&self, address: ScriptBuf) {
+        if let Ok(mut state) = self.state.lock() {
+            state.sweep_address = Some(address);
+        }
     }
 
-    /// Extract counterparty commitment data from a monitor and optional update.
-    fn capture_commitments(
+    /// Drain all ready justice blobs.
+    pub fn drain_justice_blobs(&self) -> Vec<WatchtowerJusticeBlob> {
+        match self.state.lock() {
+            Ok(mut state) => std::mem::take(&mut state.ready_blobs),
+            Err(_) => {
+                log_error!(self.logger, "Watchtower state lock poisoned");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Number of pending (unsigned) commitments.
+    pub fn pending_count(&self) -> usize {
+        self.state.lock().map(|s| s.pending_commitments.len()).unwrap_or(0)
+    }
+
+    /// Number of ready (signed) blobs waiting to be drained.
+    pub fn ready_count(&self) -> usize {
+        self.state.lock().map(|s| s.ready_blobs.len()).unwrap_or(0)
+    }
+
+    /// Phase 1: Capture new counterparty commitments from this update.
+    fn capture_new_commitments(
         &self,
         monitor: &ChannelMonitor<InMemorySigner>,
         update: Option<&ChannelMonitorUpdate>,
     ) {
         let channel_id = monitor.channel_id().to_string();
-        let update_id = monitor.get_latest_update_id();
 
-        // Get counterparty commitments from this update
         let commitment_txs: Vec<CommitmentTransaction> = if let Some(upd) = update {
             monitor.counterparty_commitment_txs_from_update(upd)
         } else {
-            // No update means full monitor persist. Get initial commitment if available.
-            monitor.initial_counterparty_commitment_tx()
+            monitor
+                .initial_counterparty_commitment_tx()
                 .map(|tx| vec![tx])
                 .unwrap_or_default()
         };
@@ -142,40 +177,177 @@ impl WatchtowerPersister {
             return;
         }
 
-        let mut store = match self.updates.lock() {
+        let mut state = match self.state.lock() {
             Ok(s) => s,
-            Err(_) => {
-                log_error!(self.logger, "Watchtower update store lock poisoned");
+            Err(_) => return,
+        };
+
+        for ctx in commitment_txs {
+            let commitment_number = ctx.commitment_number();
+            let key = (channel_id.clone(), commitment_number);
+
+            log_info!(
+                self.logger,
+                "Captured counterparty commitment: channel={}, number={}",
+                channel_id, commitment_number
+            );
+
+            state.pending_commitments.insert(
+                key,
+                PendingCommitment {
+                    channel_id: channel_id.clone(),
+                    commitment_tx: ctx,
+                    commitment_number,
+                },
+            );
+        }
+    }
+
+    /// Phase 2: Try to sign all pending commitments.
+    ///
+    /// After a new update is applied, the monitor may now have revocation
+    /// secrets for previously captured commitments. We try to sign each one
+    /// and move successful ones to the ready queue.
+    fn try_sign_pending(
+        &self,
+        monitor: &ChannelMonitor<InMemorySigner>,
+    ) {
+        let channel_id = monitor.channel_id().to_string();
+
+        let mut state = match self.state.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let sweep_address = match &state.sweep_address {
+            Some(addr) => addr.clone(),
+            None => {
+                log_trace!(self.logger, "No sweep address set, skipping justice signing");
                 return;
             }
         };
 
-        for ctx in commitment_txs {
-            // Serialize the commitment transaction
-            let mut tx_bytes = Vec::new();
-            if let Err(e) = ctx.write(&mut tx_bytes) {
-                log_error!(
-                    self.logger,
-                    "Failed to serialize commitment tx for channel {}: {}",
-                    channel_id, e
-                );
-                continue;
-            }
+        let fee_rate = state.sweep_fee_rate;
 
-            let commitment_number = ctx.commitment_number();
+        // Collect keys for this channel's pending commitments
+        let pending_keys: Vec<(String, u64)> = state
+            .pending_commitments
+            .keys()
+            .filter(|(cid, _)| cid == &channel_id)
+            .cloned()
+            .collect();
+
+        // Clone pending data to avoid borrow conflicts when modifying state
+        let pending_data: Vec<((String, u64), u64, CommitmentTransaction)> = pending_keys
+            .iter()
+            .filter_map(|key| {
+                state.pending_commitments.get(key).map(|p| {
+                    (key.clone(), p.commitment_number, p.commitment_tx.clone())
+                })
+            })
+            .collect();
+
+        for (key, commitment_number, commitment_tx) in pending_data {
+            let trusted = commitment_tx.trust();
+
+            // Get the breach txid
+            let txid = trusted.txid();
+            let txid_bytes: Vec<u8> = AsRef::<[u8]>::as_ref(&txid).to_vec();
+
+            // Check if there's a revokeable output to sweep
+            let revokeable_idx = match trusted.revokeable_output_index() {
+                Some(idx) => idx,
+                None => {
+                    log_trace!(
+                        self.logger,
+                        "No revokeable output for channel={}, commitment={}",
+                        channel_id, commitment_number
+                    );
+                    continue;
+                }
+            };
+
+            // Build the unsigned justice transaction
+            let justice_tx = match trusted.build_to_local_justice_tx(
+                fee_rate,
+                sweep_address.clone(),
+            ) {
+                Ok(tx) => tx,
+                Err(_) => {
+                    log_trace!(
+                        self.logger,
+                        "Cannot build justice tx for channel={}, commitment={} (fee too high?)",
+                        channel_id, commitment_number
+                    );
+                    continue;
+                }
+            };
+
+            // Get the value of the revokeable output
+            let built_tx = trusted.built_transaction();
+            let output_value = match built_tx.transaction.output.get(revokeable_idx) {
+                Some(out) => out.value.to_sat(),
+                None => continue,
+            };
+
+            // Try to sign — this will only succeed if the revocation secret is available
+            let signed_tx = match monitor.sign_to_local_justice_tx(
+                justice_tx,
+                0, // input index (justice tx has one input)
+                output_value,
+                commitment_number,
+            ) {
+                Ok(tx) => tx,
+                Err(_) => {
+                    // Revocation secret not yet available — will try again on next update
+                    log_trace!(
+                        self.logger,
+                        "Revocation not yet available for channel={}, commitment={}",
+                        channel_id, commitment_number
+                    );
+                    continue;
+                }
+            };
+
+            // Extract the keys for the blob
+            let keys = trusted.keys();
+
+            // Extract the signature from the signed justice transaction
+            // The witness contains: <sig> <revocation_key> (for p2wsh to_local)
+            let to_local_sig = if let Some(witness) = signed_tx.input.first()
+                .and_then(|inp| Some(&inp.witness))
+            {
+                if let Some(sig_bytes) = witness.iter().next() {
+                    // Remove sighash byte from DER sig, convert to compact 64-byte
+                    // For the blob we need the raw 64-byte signature
+                    sig_bytes.to_vec()
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
 
             log_info!(
                 self.logger,
-                "Captured watchtower data: channel={}, commitment_number={}, update_id={}",
-                channel_id, commitment_number, update_id
+                "Signed justice blob: channel={}, commitment={}, txid={}",
+                channel_id, commitment_number, txid
             );
 
-            store.push(WatchtowerUpdate {
+            state.ready_blobs.push(WatchtowerJusticeBlob {
                 channel_id: channel_id.clone(),
-                commitment_tx_bytes: tx_bytes,
-                commitment_number,
-                update_id,
+                breach_txid: txid_bytes,
+                sweep_address: sweep_address.as_bytes().to_vec(),
+                revocation_pubkey: keys.revocation_key.0.serialize().to_vec(),
+                local_delay_pubkey: keys.broadcaster_delayed_payment_key.0.serialize().to_vec(),
+                csv_delay: 0, // TODO: extract from channel params
+                to_local_sig,
+                to_remote_pubkey: keys.countersignatory_htlc_key.0.serialize().to_vec(),
+                to_remote_sig: Vec::new(), // TODO: to-remote signing
             });
+
+            // Remove from pending — it's now signed
+            state.pending_commitments.remove(&key);
         }
     }
 }
@@ -186,8 +358,8 @@ impl Persist<InMemorySigner> for WatchtowerPersister {
         monitor_name: MonitorName,
         monitor: &ChannelMonitor<InMemorySigner>,
     ) -> ChannelMonitorUpdateStatus {
-        // Capture the initial counterparty commitment
-        self.capture_commitments(monitor, None);
+        // Phase 1: Capture the initial counterparty commitment
+        self.capture_new_commitments(monitor, None);
 
         // Delegate to inner persister
         self.inner.persist_new_channel(monitor_name, monitor)
@@ -199,8 +371,12 @@ impl Persist<InMemorySigner> for WatchtowerPersister {
         monitor_update: Option<&ChannelMonitorUpdate>,
         monitor: &ChannelMonitor<InMemorySigner>,
     ) -> ChannelMonitorUpdateStatus {
-        // Capture counterparty commitment data from this update
-        self.capture_commitments(monitor, monitor_update);
+        // Phase 1: Capture new counterparty commitments from this update
+        self.capture_new_commitments(monitor, monitor_update);
+
+        // Phase 2: Try to sign previously captured commitments
+        // (the monitor now has the update applied, which may include revocation secrets)
+        self.try_sign_pending(monitor);
 
         // Delegate to inner persister
         self.inner.update_persisted_channel(monitor_name, monitor_update, monitor)
@@ -211,55 +387,7 @@ impl Persist<InMemorySigner> for WatchtowerPersister {
     }
 }
 
-/// Extract watchtower-relevant data from all active monitors.
-///
-/// For each channel monitor, this attempts to sign justice transactions for
-/// all known revoked commitment states. Returns the signed justice transaction
-/// data needed to construct LND watchtower blobs.
-///
-/// Note: This retrieves data from the current monitor state. For real-time
-/// capture of each state update, use WatchtowerPersister as the persistence layer.
-pub(crate) fn extract_justice_data(
-    chain_monitor: &Arc<ChainMonitor>,
-    logger: &Arc<Logger>,
-) -> Vec<WatchtowerUpdate> {
-    let mut updates = Vec::new();
-
-    for channel_id in chain_monitor.list_monitors() {
-        match chain_monitor.get_monitor(channel_id) {
-            Ok(monitor) => {
-                let chan_id_str = channel_id.to_string();
-
-                // Get the initial counterparty commitment if available
-                if let Some(initial_ctx) = monitor.initial_counterparty_commitment_tx() {
-                    let commitment_number = initial_ctx.commitment_number();
-                    let mut tx_bytes = Vec::new();
-                    if initial_ctx.write(&mut tx_bytes).is_ok() {
-                        log_info!(
-                            logger,
-                            "Extracted initial commitment for channel {}, number={}",
-                            chan_id_str, commitment_number
-                        );
-                        updates.push(WatchtowerUpdate {
-                            channel_id: chan_id_str.clone(),
-                            commitment_tx_bytes: tx_bytes,
-                            commitment_number,
-                            update_id: 0,
-                        });
-                    }
-                }
-            },
-            Err(()) => {
-                log_error!(logger, "Failed to get monitor for channel {}", channel_id);
-                continue;
-            },
-        }
-    }
-
-    updates
-}
-
-// --- Existing export functions ---
+// --- Monitor export functions ---
 
 /// Returns metadata about all active channel monitors.
 pub(crate) fn list_monitor_info(

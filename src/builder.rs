@@ -1935,7 +1935,7 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver,
-		watchtower_updates: persister.update_store(),
+		watchtower_persister: Arc::clone(&persister),
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})
