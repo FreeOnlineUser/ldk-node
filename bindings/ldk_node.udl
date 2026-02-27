@@ -141,6 +141,7 @@ interface Node {
 	sequence<WatchtowerMonitorInfo> watchtower_list_monitors();
 	[Throws=NodeError]
 	sequence<WatchtowerMonitorData> watchtower_export_monitors();
+	sequence<WatchtowerUpdate> watchtower_extract_justice_data();
 };
 
 typedef interface Bolt11Payment;
@@ -178,6 +179,13 @@ dictionary WatchtowerMonitorData {
 	string counterparty_node_id;
 	u64 latest_update_id;
 	bytes monitor_bytes;
+};
+
+dictionary WatchtowerUpdate {
+	string channel_id;
+	bytes commitment_tx_bytes;
+	u64 commitment_number;
+	u64 update_id;
 };
 
 [Error]
