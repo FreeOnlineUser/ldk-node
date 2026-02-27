@@ -290,6 +290,29 @@ impl WatchtowerPersister {
                 None => continue,
             };
 
+            // Extract the real CSV delay by matching the revokeable output's P2WSH script.
+            // The delay is embedded in the OP_CSV opcode of the redeemscript.
+            // We try candidate values and match against the commitment tx output.
+            let revokeable_output_script = &built_tx.transaction.output[revokeable_idx].script_pubkey;
+            let csv_delay = {
+                use lightning::ln::chan_utils::get_revokeable_redeemscript;
+                let keys = trusted.keys();
+                let mut found_delay: u32 = 144; // safe default
+                // LN spec: to_self_delay typically 40-2016, most common is 144
+                for candidate in (1u16..=2016).chain(std::iter::once(4032)) {
+                    let script = get_revokeable_redeemscript(
+                        &keys.revocation_key,
+                        candidate,
+                        &keys.broadcaster_delayed_payment_key,
+                    ).to_p2wsh();
+                    if script == *revokeable_output_script {
+                        found_delay = candidate as u32;
+                        break;
+                    }
+                }
+                found_delay
+            };
+
             // Try to sign — this will only succeed if the revocation secret is available
             let signed_tx = match monitor.sign_to_local_justice_tx(
                 justice_tx,
@@ -340,7 +363,7 @@ impl WatchtowerPersister {
                 sweep_address: sweep_address.as_bytes().to_vec(),
                 revocation_pubkey: keys.revocation_key.0.serialize().to_vec(),
                 local_delay_pubkey: keys.broadcaster_delayed_payment_key.0.serialize().to_vec(),
-                csv_delay: 0, // TODO: extract from channel params
+                csv_delay,
                 to_local_sig,
                 to_remote_pubkey: keys.countersignatory_htlc_key.0.serialize().to_vec(),
                 to_remote_sig: Vec::new(), // TODO: to-remote signing
