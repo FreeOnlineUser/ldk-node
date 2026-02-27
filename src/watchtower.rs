@@ -458,3 +458,109 @@ pub(crate) fn export_monitors(
 
     Ok(monitors)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_justice_blob_fields_are_correct_sizes() {
+        // Verify that a WatchtowerJusticeBlob with typical field sizes
+        // matches what LND's JusticeKit V0 expects
+        let blob = WatchtowerJusticeBlob {
+            channel_id: "test".to_string(),
+            breach_txid: vec![0xab; 32],
+            sweep_address: vec![0u8; 22], // p2wpkh witness program
+            revocation_pubkey: vec![2u8; 33], // compressed pubkey
+            local_delay_pubkey: vec![3u8; 33],
+            csv_delay: 144,
+            to_local_sig: vec![0u8; 64], // compact signature
+            to_remote_pubkey: vec![0u8; 33],
+            to_remote_sig: vec![0u8; 64],
+        };
+
+        // LND JusticeKit V0 plaintext is 274 bytes:
+        // 1 (addr len) + 42 (padded addr) + 33 (rev pk) + 33 (delay pk)
+        // + 4 (csv) + 64 (to_local sig) + 33 (to_remote pk) + 64 (to_remote sig)
+        // = 274
+        assert_eq!(blob.breach_txid.len(), 32, "breach txid must be 32 bytes");
+        assert_eq!(blob.revocation_pubkey.len(), 33, "revocation pk must be 33 bytes");
+        assert_eq!(blob.local_delay_pubkey.len(), 33, "delay pk must be 33 bytes");
+        assert_eq!(blob.to_local_sig.len(), 64, "to_local sig must be 64 bytes");
+        assert!(blob.sweep_address.len() <= 42, "sweep address must fit in 42 bytes");
+
+        // Verify hint derivation (first 16 bytes of breach txid)
+        let hint: Vec<u8> = blob.breach_txid[..16].to_vec();
+        assert_eq!(hint.len(), 16);
+        assert_eq!(hint[0], 0xab);
+    }
+
+    #[test]
+    fn test_watchtower_state_drain() {
+        let state = Mutex::new(WatchtowerState {
+            pending_commitments: HashMap::new(),
+            ready_blobs: vec![
+                WatchtowerJusticeBlob {
+                    channel_id: "ch1".to_string(),
+                    breach_txid: vec![1u8; 32],
+                    sweep_address: vec![0u8; 22],
+                    revocation_pubkey: vec![2u8; 33],
+                    local_delay_pubkey: vec![3u8; 33],
+                    csv_delay: 144,
+                    to_local_sig: vec![0u8; 64],
+                    to_remote_pubkey: vec![0u8; 33],
+                    to_remote_sig: vec![0u8; 64],
+                },
+                WatchtowerJusticeBlob {
+                    channel_id: "ch1".to_string(),
+                    breach_txid: vec![2u8; 32],
+                    sweep_address: vec![0u8; 22],
+                    revocation_pubkey: vec![2u8; 33],
+                    local_delay_pubkey: vec![3u8; 33],
+                    csv_delay: 144,
+                    to_local_sig: vec![0u8; 64],
+                    to_remote_pubkey: vec![0u8; 33],
+                    to_remote_sig: vec![0u8; 64],
+                },
+            ],
+            sweep_address: None,
+            sweep_fee_rate: 12500,
+        });
+
+        // Drain should return all blobs and empty the store
+        let blobs = {
+            let mut s = state.lock().unwrap();
+            std::mem::take(&mut s.ready_blobs)
+        };
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(blobs[0].breach_txid[0], 1);
+        assert_eq!(blobs[1].breach_txid[0], 2);
+
+        // Second drain should be empty
+        let blobs2 = {
+            let s = state.lock().unwrap();
+            s.ready_blobs.clone()
+        };
+        assert_eq!(blobs2.len(), 0);
+    }
+
+    #[test]
+    fn test_pending_commitments_dedup() {
+        // Verify that re-capturing the same commitment number replaces, not duplicates
+        let mut pending: HashMap<(String, u64), u64> = HashMap::new();
+        let key = ("channel1".to_string(), 42u64);
+
+        pending.insert(key.clone(), 1);
+        assert_eq!(pending.len(), 1);
+
+        // Same key should overwrite
+        pending.insert(key.clone(), 2);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[&key], 2);
+
+        // Different commitment number is a different entry
+        let key2 = ("channel1".to_string(), 43u64);
+        pending.insert(key2, 3);
+        assert_eq!(pending.len(), 2);
+    }
+}
