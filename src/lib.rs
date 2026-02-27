@@ -165,7 +165,7 @@ use types::{
 	Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
-pub use watchtower::{WatchtowerMonitorData, WatchtowerMonitorInfo};
+pub use watchtower::{WatchtowerMonitorData, WatchtowerMonitorInfo, WatchtowerUpdate};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -1731,6 +1731,15 @@ impl Node {
 	/// LDK-based chain watcher.
 	pub fn watchtower_export_monitors(&self) -> Result<Vec<watchtower::WatchtowerMonitorData>, Error> {
 		watchtower::export_monitors(&self.chain_monitor, &self.logger)
+	}
+
+	/// Extracts watchtower-relevant justice data from all active channel monitors.
+	///
+	/// Returns counterparty commitment transaction data that can be used to
+	/// construct LND-compatible watchtower justice blobs. Each entry contains
+	/// the serialized commitment transaction and its commitment number.
+	pub fn watchtower_extract_justice_data(&self) -> Vec<watchtower::WatchtowerUpdate> {
+		watchtower::extract_justice_data(&self.chain_monitor, &self.logger)
 	}
 
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
