@@ -141,7 +141,7 @@ interface Node {
 	sequence<WatchtowerMonitorInfo> watchtower_list_monitors();
 	[Throws=NodeError]
 	sequence<WatchtowerMonitorData> watchtower_export_monitors();
-	sequence<WatchtowerUpdate> watchtower_extract_justice_data();
+	sequence<WatchtowerUpdate> watchtower_drain_updates();
 };
 
 typedef interface Bolt11Payment;
