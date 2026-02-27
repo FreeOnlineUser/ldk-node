@@ -106,6 +106,8 @@ mod scoring;
 mod tx_broadcaster;
 mod types;
 mod wallet;
+/// Watchtower support for exporting channel monitors to external watchtower services.
+pub mod watchtower;
 
 use std::default::Default;
 use std::net::ToSocketAddrs;
@@ -178,7 +180,11 @@ use types::{
 	Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
-pub use vss_client;
+pub use watchtower::{WatchtowerMonitorData, WatchtowerMonitorInfo};
+pub use {
+	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
+	vss_client,
+};
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
@@ -1929,6 +1935,29 @@ impl Node {
 	/// secret key corresponding to the given public key.
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
 		self.keys_manager.verify_signature(msg, sig, pkey)
+	}
+
+	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
+	/// a limited view of the network.
+	/// Returns metadata about all active channel monitors for watchtower synchronization.
+	///
+	/// This information can be used to determine which monitors need to be synced
+	/// to an external watchtower service.
+	pub fn watchtower_list_monitors(&self) -> Vec<watchtower::WatchtowerMonitorInfo> {
+		watchtower::list_monitor_info(&self.chain_monitor, &self.logger)
+	}
+
+	/// Exports all channel monitors as serialized bytes for watchtower replication.
+	///
+	/// The returned data contains full serialized LDK channel monitors which can be
+	/// loaded by any LDK-compatible watchtower service to independently watch the
+	/// chain and broadcast justice transactions if a counterparty cheats.
+	///
+	/// This enables cross-implementation watchtower support: the serialized monitors
+	/// can be sent to a remote node (e.g., a home server) which runs a lightweight
+	/// LDK-based chain watcher.
+	pub fn watchtower_export_monitors(&self) -> Result<Vec<watchtower::WatchtowerMonitorData>, Error> {
+		watchtower::export_monitors(&self.chain_monitor, &self.logger)
 	}
 
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have

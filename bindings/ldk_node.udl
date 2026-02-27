@@ -138,6 +138,9 @@ interface Node {
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	[Throws=NodeError]
 	bytes export_pathfinding_scores();
+	sequence<WatchtowerMonitorInfo> watchtower_list_monitors();
+	[Throws=NodeError]
+	sequence<WatchtowerMonitorData> watchtower_export_monitors();
 };
 
 typedef interface Bolt11Payment;
@@ -162,6 +165,20 @@ interface FeeRate {
 typedef interface UnifiedPayment;
 
 typedef interface LSPS1Liquidity;
+
+dictionary WatchtowerMonitorInfo {
+	string channel_id;
+	string counterparty_node_id;
+	u64 latest_update_id;
+	string funding_txo;
+};
+
+dictionary WatchtowerMonitorData {
+	string channel_id;
+	string counterparty_node_id;
+	u64 latest_update_id;
+	bytes monitor_bytes;
+};
 
 [Error]
 enum NodeError {
