@@ -333,6 +333,17 @@ impl BitcoindChainSource {
 		self.poll_chain_tip().await.map(|tip| tip.to_best_block())
 	}
 
+	/// Fetch the block hash at a specific height. Used for wallet birthday recovery.
+	pub(super) async fn poll_block_hash_at_height(
+		&self, height: u32,
+	) -> Result<BlockHash, Error> {
+		let utxo_source = self.as_utxo_source();
+		utxo_source
+			.get_block_hash_by_height(height)
+			.await
+			.map_err(|_| Error::TxSyncFailed)
+	}
+
 	async fn poll_chain_tip(&self) -> Result<ValidatedBlockHeader, Error> {
 		let validate_res = tokio::time::timeout(
 			Duration::from_secs(CHAIN_POLLING_TIMEOUT_SECS),

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use bitcoin::{Script, Txid};
+use bitcoin::{BlockHash, Script, Txid};
 use lightning::chain::{BestBlock, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
@@ -24,7 +24,7 @@ use crate::config::{
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
@@ -216,6 +216,21 @@ impl ChainSource {
 
 	pub(crate) fn registered_txids(&self) -> Vec<Txid> {
 		self.registered_txids.lock().unwrap().clone()
+	}
+
+	/// Fetch the block hash at a specific height. Only supported for bitcoind backends.
+	pub(crate) async fn poll_block_hash_at_height(
+		&self, height: u32,
+	) -> Result<BlockHash, Error> {
+		match &self.kind {
+			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+				bitcoind_chain_source.poll_block_hash_at_height(height).await
+			},
+			_ => {
+				log_error!(self.logger, "Wallet birthday is only supported with bitcoind backend");
+				Err(Error::TxSyncFailed)
+			},
+		}
 	}
 
 	pub(crate) fn is_transaction_based(&self) -> bool {

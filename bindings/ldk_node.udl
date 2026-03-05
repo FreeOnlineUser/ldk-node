@@ -121,6 +121,7 @@ interface Builder {
 	void set_log_facade_logger();
 	void set_custom_logger(LogWriter log_writer);
 	void set_network(Network network);
+	void set_wallet_birthday_height(u32 height);
 	[Throws=BuildError]
 	void set_listening_addresses(sequence<SocketAddress> listening_addresses);
 	[Throws=BuildError]

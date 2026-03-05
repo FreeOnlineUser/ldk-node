@@ -138,6 +138,19 @@ pub struct Config {
 	pub storage_dir_path: String,
 	/// The used Bitcoin network.
 	pub network: Network,
+	/// Optional wallet birthday height for seed recovery.
+	///
+	/// When set, a newly created wallet will start syncing from this block height instead of
+	/// the current chain tip. This allows recovering on-chain funds from historical transactions
+	/// after restoring from a seed backup.
+	///
+	/// **Note:** The block at the given height must be available on the connected chain source.
+	/// On pruned nodes, set this to a height above the prune height. If the block is unavailable,
+	/// sync will fall back to the current tip.
+	///
+	/// This setting is ignored for existing (previously persisted) wallets, as they already
+	/// have their own checkpoint history.
+	pub wallet_birthday_height: Option<u32>,
 	/// The addresses on which the node will listen for incoming connections.
 	///
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
@@ -199,6 +212,7 @@ impl Default for Config {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
 			network: DEFAULT_NETWORK,
+			wallet_birthday_height: None,
 			listening_addresses: None,
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
