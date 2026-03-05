@@ -6,6 +6,7 @@ namespace ldk_node {
 dictionary Config {
 	string storage_dir_path;
 	Network network;
+	u32? wallet_birthday_height;
 	sequence<SocketAddress>? listening_addresses;
 	sequence<SocketAddress>? announcement_addresses;
 	NodeAlias? node_alias;
