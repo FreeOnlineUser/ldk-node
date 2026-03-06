@@ -69,7 +69,7 @@ use crate::liquidity::{
 	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
 };
 use crate::lnurl_auth::LnurlAuth;
-use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
@@ -492,6 +492,18 @@ impl NodeBuilder {
 	/// Sets the Bitcoin network used.
 	pub fn set_network(&mut self, network: Network) -> &mut Self {
 		self.config.network = network;
+		self
+	}
+
+	/// Sets the wallet birthday height for seed recovery.
+	///
+	/// When restoring from a seed backup, set this to the block height at or before the
+	/// earliest expected transaction. The wallet will sync from this height, recovering
+	/// any on-chain funds without needing to sweep.
+	///
+	/// Use with `scantxoutset` to automatically determine the correct height.
+	pub fn set_wallet_birthday_height(&mut self, height: u32) -> &mut Self {
+		self.config.wallet_birthday_height = Some(height);
 		self
 	}
 
@@ -939,6 +951,15 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_network(network);
 	}
 
+	/// Sets the wallet birthday height for seed recovery.
+	///
+	/// When restoring from a seed backup, set this to the block height at or before the
+	/// earliest expected transaction. The wallet will sync from this height, recovering
+	/// any on-chain funds without needing to sweep.
+	pub fn set_wallet_birthday_height(&self, height: u32) {
+		self.inner.write().unwrap().set_wallet_birthday_height(height);
+	}
+
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
 	pub fn set_listening_addresses(
 		&self, listening_addresses: Vec<SocketAddress>,
@@ -1272,6 +1293,42 @@ fn build_with_store_internal(
 			)
 		},
 	};
+	// If wallet_birthday_height is set, override chain_tip_opt to start sync from that height.
+	// This enables seed recovery by making synchronize_listeners process blocks from the
+	// birthday height, finding historical deposits without needing to sweep.
+	let chain_tip_opt = if let Some(birthday_height) = config.wallet_birthday_height {
+		match &chain_tip_opt {
+			Some(current_tip) if birthday_height < current_tip.height => {
+				// Fetch the block hash at the birthday height from the chain source
+				match runtime.block_on(async {
+					chain_source.poll_block_hash_at_height(birthday_height).await
+				}) {
+					Ok(block_hash) => {
+						log_info!(
+							logger,
+							"Wallet birthday set: syncing from height {} instead of tip {}",
+							birthday_height,
+							current_tip.height
+						);
+						Some(BestBlock::new(block_hash, birthday_height))
+					},
+					Err(e) => {
+						log_error!(
+							logger,
+							"Failed to fetch block hash at birthday height {}: {}. Falling back to current tip.",
+							birthday_height,
+							e
+						);
+						chain_tip_opt
+					},
+				}
+			},
+			_ => chain_tip_opt,
+		}
+	} else {
+		chain_tip_opt
+	};
+
 	let chain_source = Arc::new(chain_source);
 
 	// Initialize the on-chain wallet and chain access
