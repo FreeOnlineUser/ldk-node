@@ -1454,6 +1454,43 @@ impl Node {
 		})
 	}
 
+	/// Rebroadcast holder commitment transactions for all channel monitors.
+	///
+	/// This is useful when a force-close commitment tx failed to broadcast
+	/// (e.g., network was down). The channel monitor stores the commitment tx
+	/// and this method re-queues it for broadcast.
+	pub fn broadcast_holder_commitment_txns(&self) -> Result<(), Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let active_channel_ids: std::collections::HashSet<_> = self.channel_manager
+			.list_channels().iter().map(|c| c.channel_id).collect();
+		let monitor_ids = self.chain_monitor.list_monitors();
+
+		let mut count = 0u32;
+		for channel_id in &monitor_ids {
+			// Skip monitors that have an active channel
+			if active_channel_ids.contains(channel_id) {
+				continue;
+			}
+			if let Ok(monitor) = self.chain_monitor.get_monitor(*channel_id) {
+				monitor.broadcast_latest_holder_commitment_txn(
+					&*self.tx_broadcaster,
+					&*self.fee_estimator,
+					&self.logger,
+				);
+				count += 1;
+			}
+		}
+
+		if count > 0 {
+			log_info!(self.logger, "Rebroadcast holder commitment txns for {} closed channel monitors", count);
+		}
+
+		Ok(())
+	}
+
 	/// Close a previously opened channel.
 	///
 	/// Will attempt to close a channel coopertively. If this fails, users might need to resort to
