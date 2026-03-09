@@ -181,6 +181,8 @@ interface Node {
 	[Throws=NodeError]
 	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
+	void close_channel_with_target_feerate([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, u32 target_feerate_sat_per_1000_weight);
+	[Throws=NodeError]
 	void force_close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, string? reason);
 	[Throws=NodeError]
 	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);

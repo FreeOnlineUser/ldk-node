@@ -1501,6 +1501,44 @@ impl Node {
 		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None)
 	}
 
+	/// Close a previously opened channel, specifying a target feerate for the closing transaction.
+	///
+	/// Setting a low `target_feerate_sat_per_1000_weight` (e.g. 253, the minimum relay fee)
+	/// widens the acceptable fee range, making cooperative close much more likely to succeed.
+	/// This is particularly useful for mobile/intermittent nodes where the local fee estimate
+	/// may be stale and disagree with the always-online counterparty.
+	///
+	/// If the fee ranges still don't overlap, the channel will be force-closed after a timeout.
+	pub fn close_channel_with_target_feerate(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		target_feerate_sat_per_1000_weight: u32,
+	) -> Result<(), Error> {
+		let open_channels: Vec<LdkChannelDetails> =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			self.channel_manager
+				.close_channel_with_feerate_and_script(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					Some(target_feerate_sat_per_1000_weight),
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to close channel with target feerate: {:?}", e);
+					Error::ChannelClosingFailed
+				})?;
+
+			// Check if this was the last open channel, if so, forget the peer.
+			if open_channels.len() == 1 {
+				self.peer_store.remove_peer(&counterparty_node_id)?;
+			}
+		}
+
+		Ok(())
+	}
+
 	/// Force-close a previously opened channel.
 	///
 	/// Will force-close the channel, potentially broadcasting our latest state. Note that in
