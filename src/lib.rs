@@ -1963,7 +1963,8 @@ impl Node {
 
 			let is_persisted = stored_peer.is_some();
 			let is_connected = true;
-			let details = PeerDetails { node_id, address, is_persisted, is_connected };
+			let supports_anchors = connected_peer.init_features.supports_anchors_zero_fee_htlc_tx();
+			let details = PeerDetails { node_id, address, is_persisted, is_connected, supports_anchors };
 			peers.push(details);
 		}
 
@@ -1978,6 +1979,7 @@ impl Node {
 				address: p.address,
 				is_persisted: true,
 				is_connected: false,
+				supports_anchors: false, // Unknown until connected
 			};
 
 			peers.push(details);
