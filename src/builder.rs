@@ -68,7 +68,7 @@ use crate::io::{
 use crate::liquidity::{
 	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
 };
-use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
@@ -245,6 +245,7 @@ pub struct NodeBuilder {
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	recovery_mode: bool,
+	wallet_birthday_height: Option<u32>,
 }
 
 impl NodeBuilder {
@@ -263,6 +264,7 @@ impl NodeBuilder {
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
 		let recovery_mode = false;
+		let wallet_birthday_height = None;
 		Self {
 			config,
 			chain_data_source_config,
@@ -273,6 +275,7 @@ impl NodeBuilder {
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
 			recovery_mode,
+			wallet_birthday_height,
 		}
 	}
 
@@ -557,6 +560,21 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Sets the wallet birthday height for recovery.
+	///
+	/// When set, the on-chain wallet will start scanning from the given block height
+	/// instead of the current chain tip. This is critical for recovering funds on
+	/// pruned nodes where scanning from genesis would fail due to missing blocks.
+	///
+	/// The birthday height should be set to a block height shortly before the wallet's
+	/// first transaction. If unknown, use a conservative estimate.
+	///
+	/// This only takes effect when creating a new wallet (not when loading an existing one).
+	pub fn set_wallet_birthday_height(&mut self, height: u32) -> &mut Self {
+		self.wallet_birthday_height = Some(height);
+		self
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
@@ -693,6 +711,7 @@ impl NodeBuilder {
 			self.pathfinding_scores_sync_config.as_ref(),
 			self.async_payments_role,
 			self.recovery_mode,
+			self.wallet_birthday_height,
 			seed_bytes,
 			runtime,
 			logger,
@@ -942,6 +961,13 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_wallet_recovery_mode();
 	}
 
+	/// Sets the wallet birthday height for recovery on pruned nodes.
+	///
+	/// See [`NodeBuilder::set_wallet_birthday_height`] for details.
+	pub fn set_wallet_birthday_height(&self, height: u32) {
+		self.inner.write().unwrap().set_wallet_birthday_height(height);
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
@@ -1056,7 +1082,8 @@ fn build_with_store_internal(
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
-	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
+	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool,
+	wallet_birthday_height: Option<u32>, seed_bytes: [u8; 64],
 	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
@@ -1253,10 +1280,72 @@ fn build_with_store_internal(
 					BuildError::WalletSetupFailed
 				})?;
 
-			if !recovery_mode {
+			if let Some(birthday_height) = wallet_birthday_height {
+				// Wallet birthday: insert a checkpoint at the birthday block so the
+				// wallet syncs from there instead of the current tip or genesis.
+				// This is critical for pruned nodes where blocks before the birthday
+				// may not be available.
+				log_info!(
+					logger,
+					"Wallet birthday set to height {}. Fetching block hash...",
+					birthday_height
+				);
+				// Fetch the block hash at the birthday height from the chain source
+				let birthday_hash_res = runtime.block_on(async {
+					chain_source.get_block_hash_by_height(birthday_height).await
+				});
+				match birthday_hash_res {
+					Ok(birthday_hash) => {
+						log_info!(
+							logger,
+							"Setting wallet checkpoint at birthday block {} ({})",
+							birthday_height,
+							birthday_hash
+						);
+						let mut latest_checkpoint = wallet.latest_checkpoint();
+						let block_id = bdk_chain::BlockId {
+							height: birthday_height,
+							hash: birthday_hash,
+						};
+						latest_checkpoint = latest_checkpoint.insert(block_id);
+						let update = bdk_wallet::Update {
+							chain: Some(latest_checkpoint),
+							..Default::default()
+						};
+						wallet.apply_update(update).map_err(|e| {
+							log_error!(logger, "Failed to apply birthday checkpoint: {}", e);
+							BuildError::WalletSetupFailed
+						})?;
+					},
+					Err(e) => {
+						log_error!(
+							logger,
+							"Failed to fetch birthday block hash at height {}: {:?}. \
+							 Falling back to current tip.",
+							birthday_height,
+							e
+						);
+						// Fall back to current tip behavior
+						if let Some(best_block) = chain_tip_opt {
+							let mut latest_checkpoint = wallet.latest_checkpoint();
+							let block_id = bdk_chain::BlockId {
+								height: best_block.height,
+								hash: best_block.block_hash,
+							};
+							latest_checkpoint = latest_checkpoint.insert(block_id);
+							let update = bdk_wallet::Update {
+								chain: Some(latest_checkpoint),
+								..Default::default()
+							};
+							wallet.apply_update(update).unwrap_or_else(|e| {
+								log_error!(logger, "Failed to apply fallback checkpoint: {}", e);
+							});
+						}
+					},
+				}
+			} else if !recovery_mode {
 				if let Some(best_block) = chain_tip_opt {
-					// Insert the first checkpoint if we have it, to avoid resyncing from genesis.
-					// TODO: Use a proper wallet birthday once BDK supports it.
+					// No birthday set: insert the current tip to avoid resyncing from genesis.
 					let mut latest_checkpoint = wallet.latest_checkpoint();
 					let block_id = bdk_chain::BlockId {
 						height: best_block.height,
@@ -1271,6 +1360,7 @@ fn build_with_store_internal(
 					})?;
 				}
 			}
+			// else: recovery_mode without birthday — sync from genesis (original behavior)
 			wallet
 		},
 	};

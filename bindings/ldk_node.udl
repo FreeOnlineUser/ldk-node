@@ -130,6 +130,7 @@ interface Builder {
 	[Throws=BuildError]
 	void set_async_payments_role(AsyncPaymentsRole? role);
 	void set_wallet_recovery_mode();
+	void set_wallet_birthday_height(u32 height);
 	[Throws=BuildError]
 	Node build(NodeEntropy node_entropy);
 	[Throws=BuildError]
@@ -185,6 +186,8 @@ interface Node {
 	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
 	void sync_wallets();
+	[Throws=NodeError]
+	void broadcast_holder_commitment_txns();
 	PaymentDetails? payment([ByRef]PaymentId payment_id);
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentId payment_id);
