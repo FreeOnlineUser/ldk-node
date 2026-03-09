@@ -600,6 +600,9 @@ pub struct PeerDetails {
 	pub is_persisted: bool,
 	/// Indicates whether we currently have an active connection with the peer.
 	pub is_connected: bool,
+	/// Indicates whether the peer supports anchor channels (zero-fee HTLC anchors).
+	/// Only available when the peer is connected (feature bits exchanged).
+	pub supports_anchors: bool,
 }
 
 /// Custom TLV entry.

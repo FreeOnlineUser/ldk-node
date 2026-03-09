@@ -664,6 +664,7 @@ dictionary PeerDetails {
 	SocketAddress address;
 	boolean is_persisted;
 	boolean is_connected;
+	boolean supports_anchors;
 };
 
 [Enum]
