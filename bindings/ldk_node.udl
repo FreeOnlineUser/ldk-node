@@ -148,6 +148,8 @@ interface Node {
 	sequence<WatchtowerMonitorData> watchtower_export_monitors();
 	sequence<WatchtowerJusticeBlob> watchtower_drain_justice_blobs();
 	void watchtower_set_sweep_address(bytes address);
+	sequence<PaymentPathInfo> payment_path_attempts();
+	void clear_payment_paths();
 };
 
 typedef interface Bolt11Payment;
@@ -172,6 +174,28 @@ interface FeeRate {
 typedef interface UnifiedPayment;
 
 typedef interface LSPS1Liquidity;
+
+dictionary RouteHopInfo {
+	string node_id;
+	u64 short_channel_id;
+	u64 fee_msat;
+	u32 cltv_expiry_delta;
+};
+
+dictionary PaymentPathInfo {
+	string payment_id;
+	sequence<RouteHopInfo> hops;
+	PaymentPathStatus status;
+	u64? failed_scid;
+	string? failure_reason;
+};
+
+[Enum]
+interface PaymentPathStatus {
+	Pending();
+	Succeeded();
+	Failed();
+};
 
 dictionary WatchtowerMonitorInfo {
 	string channel_id;

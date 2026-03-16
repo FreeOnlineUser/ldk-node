@@ -181,11 +181,8 @@ use types::{
 	Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use vss_client;
 pub use watchtower::{WatchtowerJusticeBlob, WatchtowerMonitorData, WatchtowerMonitorInfo};
-pub use {
-	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
-	vss_client,
-};
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
@@ -208,6 +205,45 @@ impl LeakChecker {
 			assert_eq!(weak.strong_count(), 0);
 		}
 	}
+}
+
+/// Information about a single hop in a payment route.
+#[derive(Clone)]
+pub struct RouteHopInfo {
+	/// The node pubkey at this hop (hex-encoded).
+	pub node_id: String,
+	/// Short channel ID used to reach this hop.
+	pub short_channel_id: u64,
+	/// Fee in millisatoshis charged at this hop.
+	pub fee_msat: u64,
+	/// CLTV expiry delta at this hop.
+	pub cltv_expiry_delta: u32,
+}
+
+/// A payment path attempt with status information.
+#[derive(Clone)]
+pub struct PaymentPathInfo {
+	/// The payment ID this path belongs to.
+	pub payment_id: String,
+	/// The hops in this path.
+	pub hops: Vec<RouteHopInfo>,
+	/// Whether this path succeeded, failed, or is pending.
+	pub status: PaymentPathStatus,
+	/// The short channel ID where failure occurred (if failed).
+	pub failed_scid: Option<u64>,
+	/// Human-readable failure reason.
+	pub failure_reason: Option<String>,
+}
+
+/// Status of a payment path attempt.
+#[derive(Clone, PartialEq)]
+pub enum PaymentPathStatus {
+	/// Path is in flight.
+	Pending,
+	/// Path succeeded.
+	Succeeded,
+	/// Path failed at a specific hop.
+	Failed,
 }
 
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
@@ -247,6 +283,8 @@ pub struct Node {
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: Arc<HRNResolver>,
 	watchtower_persister: Arc<watchtower::WatchtowerPersister>,
+	/// Tracks recent payment path attempts for UI display.
+	payment_paths: Arc<Mutex<Vec<PaymentPathInfo>>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -598,6 +636,7 @@ impl Node {
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
 			self.om_mailbox.clone(),
+			Arc::clone(&self.payment_paths),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
@@ -2052,6 +2091,18 @@ impl Node {
 	/// to your watchtower.
 	pub fn watchtower_drain_justice_blobs(&self) -> Vec<watchtower::WatchtowerJusticeBlob> {
 		self.watchtower_persister.drain_justice_blobs()
+	}
+
+	/// Returns recent payment path attempts (both succeeded and failed).
+	/// Useful for UI display of routing information.
+	/// Keeps the last 20 entries. Call `clear_payment_paths` to reset.
+	pub fn payment_path_attempts(&self) -> Vec<PaymentPathInfo> {
+		self.payment_paths.lock().unwrap().clone()
+	}
+
+	/// Clear stored payment path attempts.
+	pub fn clear_payment_paths(&self) {
+		self.payment_paths.lock().unwrap().clear();
 	}
 
 	/// Set the sweep address for watchtower justice transactions.

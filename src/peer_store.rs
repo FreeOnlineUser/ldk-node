@@ -20,7 +20,8 @@ use crate::io::{
 };
 use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
-use crate::{Error, SocketAddress};
+use crate::Error;
+use lightning::ln::msgs::SocketAddress;
 
 pub struct PeerStore<L: Deref>
 where

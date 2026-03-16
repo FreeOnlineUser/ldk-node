@@ -2026,6 +2026,7 @@ fn build_with_store_internal(
 		async_payments_role,
 		hrn_resolver,
 		watchtower_persister: Arc::clone(&persister),
+		payment_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})

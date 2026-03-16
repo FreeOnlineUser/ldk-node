@@ -515,6 +515,7 @@ where
 	static_invoice_store: Option<StaticInvoiceStore>,
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
+	pub(crate) payment_paths: Arc<std::sync::Mutex<Vec<crate::PaymentPathInfo>>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -530,6 +531,7 @@ where
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
 		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
 		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
+		payment_paths: Arc<std::sync::Mutex<Vec<crate::PaymentPathInfo>>>,
 		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
@@ -550,6 +552,7 @@ where
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
+			payment_paths,
 		}
 	}
 
@@ -1133,8 +1136,52 @@ where
 				};
 			},
 
-			LdkEvent::PaymentPathSuccessful { .. } => {},
-			LdkEvent::PaymentPathFailed { .. } => {},
+			LdkEvent::PaymentPathSuccessful { payment_id, path, .. } => {
+				let hops: Vec<crate::RouteHopInfo> = path.hops.iter().map(|h| crate::RouteHopInfo {
+					node_id: h.pubkey.to_string(),
+					short_channel_id: h.short_channel_id,
+					fee_msat: h.fee_msat,
+					cltv_expiry_delta: h.cltv_expiry_delta,
+				}).collect();
+				let info = crate::PaymentPathInfo {
+					payment_id: payment_id.to_string(),
+					hops,
+					status: crate::PaymentPathStatus::Succeeded,
+					failed_scid: None,
+					failure_reason: None,
+				};
+				if let Ok(mut paths) = self.payment_paths.lock() {
+					// Remove any previous pending entry for this payment
+					paths.retain(|p| p.payment_id != info.payment_id || p.status != crate::PaymentPathStatus::Pending);
+					paths.push(info);
+					// Keep only last 20 entries
+					if paths.len() > 20 { let drain = paths.len() - 20; paths.drain(0..drain); }
+				}
+				log_info!(self.logger, "Payment path succeeded: {} hops for payment {}",
+					path.hops.len(), payment_id);
+			},
+			LdkEvent::PaymentPathFailed { payment_id, path, short_channel_id, failure, .. } => {
+				let hops: Vec<crate::RouteHopInfo> = path.hops.iter().map(|h| crate::RouteHopInfo {
+					node_id: h.pubkey.to_string(),
+					short_channel_id: h.short_channel_id,
+					fee_msat: h.fee_msat,
+					cltv_expiry_delta: h.cltv_expiry_delta,
+				}).collect();
+				let failure_str = format!("{:?}", failure);
+				let info = crate::PaymentPathInfo {
+					payment_id: payment_id.map(|id| id.to_string()).unwrap_or_default(),
+					hops,
+					status: crate::PaymentPathStatus::Failed,
+					failed_scid: short_channel_id,
+					failure_reason: Some(failure_str),
+				};
+				if let Ok(mut paths) = self.payment_paths.lock() {
+					paths.push(info);
+					if paths.len() > 20 { let drain = paths.len() - 20; paths.drain(0..drain); }
+				}
+				log_info!(self.logger, "Payment path failed at SCID {:?}: {} hops for payment {:?}",
+					short_channel_id, path.hops.len(), payment_id);
+			},
 			LdkEvent::ProbeSuccessful { .. } => {},
 			LdkEvent::ProbeFailed { .. } => {},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
