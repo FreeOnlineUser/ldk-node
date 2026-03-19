@@ -92,7 +92,7 @@ pub(crate) const BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 pub(crate) const RGS_SNAPSHOT_MAX_SIZE: usize = 15 * 1024 * 1024;
 
 // The timeout after which we abort a RGS sync operation.
-pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
+pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 30;
 
 /// The length in bytes of our wallets' keys seed.
 pub const WALLET_KEYS_SEED_LEN: usize = 64;
@@ -102,7 +102,7 @@ pub const WALLET_KEYS_SEED_LEN: usize = 64;
 pub(crate) const EXTERNAL_PATHFINDING_SCORES_MAX_SIZE: usize = 20 * 1024 * 1024;
 
 // The timeout after which we abort a external scores sync operation.
-pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
+pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 30;
 
 // The timeout after which we abort a parsing/looking up an HRN resolution.
 pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
