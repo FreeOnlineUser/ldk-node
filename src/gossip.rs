@@ -26,6 +26,7 @@ pub(crate) enum GossipSource {
 		server_url: String,
 		latest_sync_timestamp: AtomicU32,
 		logger: Arc<Logger>,
+		socks5_proxy: Option<String>,
 	},
 }
 
@@ -44,11 +45,11 @@ impl GossipSource {
 
 	pub fn new_rgs(
 		server_url: String, latest_sync_timestamp: u32, network_graph: Arc<Graph>,
-		logger: Arc<Logger>,
+		logger: Arc<Logger>, socks5_proxy: Option<String>,
 	) -> Self {
 		let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, Arc::clone(&logger)));
 		let latest_sync_timestamp = AtomicU32::new(latest_sync_timestamp);
-		Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger }
+		Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger, socks5_proxy }
 	}
 
 	pub fn is_rgs(&self) -> bool {
@@ -65,13 +66,18 @@ impl GossipSource {
 	pub async fn update_rgs_snapshot(&self) -> Result<u32, Error> {
 		match self {
 			Self::P2PNetwork { gossip_sync: _, .. } => Ok(0),
-			Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger } => {
+			Self::RapidGossipSync { gossip_sync, server_url, latest_sync_timestamp, logger, socks5_proxy } => {
 				let query_timestamp = latest_sync_timestamp.load(Ordering::Acquire);
 				let query_url = format!("{}/{}", server_url, query_timestamp);
 
-				let query = bitreq::get(query_url)
+				let mut query = bitreq::get(query_url)
 					.with_max_body_size(Some(RGS_SNAPSHOT_MAX_SIZE))
 					.with_timeout(RGS_SYNC_TIMEOUT_SECS);
+				if let Some(proxy_addr) = socks5_proxy {
+					if let Ok(proxy) = bitreq::Proxy::new_socks5(proxy_addr) {
+						query = query.with_proxy(proxy);
+					}
+				}
 				let response = query.send_async().await.map_err(|e| {
 					log_error!(logger, "Failed to retrieve RGS gossip update: {e}");
 					Error::GossipUpdateTimeout

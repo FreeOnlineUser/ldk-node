@@ -21,6 +21,7 @@ pub fn setup_background_pathfinding_scores_sync(
 	url: String, scorer: Arc<Mutex<crate::types::Scorer>>, node_metrics: Arc<RwLock<NodeMetrics>>,
 	kv_store: Arc<DynStore>, logger: Arc<Logger>, runtime: Arc<Runtime>,
 	mut stop_receiver: tokio::sync::watch::Receiver<()>,
+	socks5_proxy: Option<String>,
 ) {
 	log_info!(logger, "External scores background syncing enabled from {}", url);
 
@@ -43,7 +44,7 @@ pub fn setup_background_pathfinding_scores_sync(
 						"Background sync of external scores started.",
 					);
 
-					sync_external_scores(logger.as_ref(), scorer.as_ref(), node_metrics.as_ref(), Arc::clone(&kv_store), &url).await;
+					sync_external_scores(logger.as_ref(), scorer.as_ref(), node_metrics.as_ref(), Arc::clone(&kv_store), &url, socks5_proxy.as_deref()).await;
 				}
 			}
 		}
@@ -52,11 +53,16 @@ pub fn setup_background_pathfinding_scores_sync(
 
 async fn sync_external_scores(
 	logger: &Logger, scorer: &Mutex<Scorer>, node_metrics: &RwLock<NodeMetrics>,
-	kv_store: Arc<DynStore>, url: &String,
+	kv_store: Arc<DynStore>, url: &String, socks5_proxy: Option<&str>,
 ) -> () {
-	let request = bitreq::get(url)
+	let mut request = bitreq::get(url)
 		.with_timeout(EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS)
 		.with_max_body_size(Some(EXTERNAL_PATHFINDING_SCORES_MAX_SIZE));
+	if let Some(proxy_addr) = socks5_proxy {
+		if let Ok(proxy) = bitreq::Proxy::new_socks5(proxy_addr) {
+			request = request.with_proxy(proxy);
+		}
+	}
 
 	let response = match request.send_async().await {
 		Ok(resp) => resp,

@@ -45,10 +45,11 @@ pub struct LnurlAuth {
 	client: Client,
 	secp: Secp256k1<All>,
 	logger: Arc<Logger>,
+	socks5_proxy: Option<String>,
 }
 
 impl LnurlAuth {
-	pub(crate) fn new(xprv: Xpriv, logger: Arc<Logger>) -> Self {
+	pub(crate) fn new(xprv: Xpriv, logger: Arc<Logger>, socks5_proxy: Option<String>) -> Self {
 		let secp = Secp256k1::new();
 		let lnurl_auth_base_xprv = xprv
 			.derive_priv(&secp, &[ChildNumber::Hardened { index: LNURL_AUTH_HARDENED_CHILD_INDEX }])
@@ -58,7 +59,7 @@ impl LnurlAuth {
 			.expect("BIP-32 derivation of m/138'/0 should not fail");
 		let hashing_key = hashing_key_xprv.private_key.secret_bytes();
 		let client = Client::new(2);
-		Self { lnurl_auth_base_xprv, hashing_key, client, secp, logger }
+		Self { lnurl_auth_base_xprv, hashing_key, client, secp, logger, socks5_proxy }
 	}
 
 	/// Authenticates with an LNURL-auth compatible service using the provided URL.
@@ -135,7 +136,12 @@ impl LnurlAuth {
 		let auth_url = format!("{lnurl_auth_url}&sig={signature}&key={linking_public_key}");
 
 		log_debug!(self.logger, "Submitting LNURL-auth response");
-		let request = bitreq::get(&auth_url);
+		let mut request = bitreq::get(&auth_url);
+		if let Some(proxy_addr) = &self.socks5_proxy {
+			if let Ok(proxy) = bitreq::Proxy::new_socks5(proxy_addr) {
+				request = request.with_proxy(proxy);
+			}
+		}
 		let auth_response = self.client.send_async(request).await.map_err(|e| {
 			log_error!(self.logger, "Failed to submit LNURL-auth response: {e}");
 			Error::LnurlAuthFailed

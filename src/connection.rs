@@ -133,6 +133,34 @@ where
 				self.await_connection(connection_future, node_id, addr).await
 			},
 			_ => {
+				// Route clearnet peers through Tor if route_all_traffic is enabled
+				if let Some(proxy_config) = self.tor_proxy_config.as_ref() {
+					if proxy_config.route_all_traffic {
+						let proxy_addr = proxy_config
+							.proxy_address
+							.to_socket_addrs()
+							.map_err(|e| {
+								log_error!(self.logger, "Failed to resolve Tor proxy address {}: {}", proxy_config.proxy_address, e);
+								self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
+								Error::InvalidSocketAddress
+							})?
+							.next()
+							.ok_or_else(|| {
+								log_error!(self.logger, "Failed to resolve Tor proxy address {}", proxy_config.proxy_address);
+								self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
+								Error::InvalidSocketAddress
+							})?;
+						let connection_future = lightning_net_tokio::tor_connect_outbound(
+							Arc::clone(&self.peer_manager),
+							node_id,
+							addr.clone(),
+							proxy_addr,
+							Arc::clone(&self.keys_manager),
+						);
+						return self.await_connection(connection_future, node_id, addr).await;
+					}
+				}
+
 				let socket_addr = addr
 					.to_socket_addrs()
 					.map_err(|e| {

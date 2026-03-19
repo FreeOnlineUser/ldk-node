@@ -500,10 +500,14 @@ pub struct BitcoindRestClientConfig {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct TorConfig {
-	/// Tor daemon SOCKS proxy address. Only connections to OnionV3 peers will be made
-	/// via this proxy; other connections (IPv4 peers, Electrum server) will not be
-	/// routed over Tor.
+	/// Tor daemon SOCKS proxy address. Connections to OnionV3 peers will always be made
+	/// via this proxy. When `route_all_traffic` is set, clearnet peer connections and
+	/// HTTP calls (RGS gossip sync, pathfinding scoring) are also routed through Tor.
 	pub proxy_address: SocketAddress,
+	/// If true, route ALL outbound traffic through the Tor SOCKS proxy, including
+	/// clearnet peer connections (via exit nodes) and HTTP requests (RGS, scoring).
+	/// Default: false (only .onion peer connections use the proxy).
+	pub route_all_traffic: bool,
 }
 
 /// Options which apply on a per-channel basis and may change at runtime or based on negotiation

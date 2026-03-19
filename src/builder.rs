@@ -1174,6 +1174,17 @@ impl ArcedNodeBuilder {
 }
 
 /// Builds a [`Node`] instance according to the options previously configured.
+/// Extract a SOCKS5 proxy address string from TorConfig when route_all_traffic is enabled.
+fn socks5_proxy_from_config(config: &Config) -> Option<String> {
+	config.tor_config.as_ref().and_then(|tc| {
+		if tc.route_all_traffic {
+			Some(tc.proxy_address.to_string())
+		} else {
+			None
+		}
+	})
+}
+
 fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
@@ -1812,6 +1823,7 @@ fn build_with_store_internal(
 				latest_sync_timestamp,
 				Arc::clone(&network_graph),
 				Arc::clone(&logger),
+				socks5_proxy_from_config(&config),
 			))
 		},
 	};
@@ -1972,7 +1984,7 @@ fn build_with_store_internal(
 		None
 	};
 
-	let lnurl_auth = Arc::new(LnurlAuth::new(xprv, Arc::clone(&logger)));
+	let lnurl_auth = Arc::new(LnurlAuth::new(xprv, Arc::clone(&logger), socks5_proxy_from_config(&config)));
 
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (background_processor_stop_sender, _) = tokio::sync::watch::channel(());

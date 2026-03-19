@@ -391,6 +391,9 @@ impl Node {
 		}
 
 		if let Some(pathfinding_scores_sync_url) = self.pathfinding_scores_sync_url.as_ref() {
+			let socks5_proxy = self.config.tor_config.as_ref().and_then(|tc| {
+				if tc.route_all_traffic { Some(tc.proxy_address.to_string()) } else { None }
+			});
 			setup_background_pathfinding_scores_sync(
 				pathfinding_scores_sync_url.clone(),
 				Arc::clone(&self.scorer),
@@ -399,6 +402,7 @@ impl Node {
 				Arc::clone(&self.logger),
 				Arc::clone(&self.runtime),
 				self.stop_sender.subscribe(),
+				socks5_proxy,
 			);
 		}
 
