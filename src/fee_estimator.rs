@@ -45,7 +45,9 @@ pub(crate) struct OnchainFeeEstimator {
 impl OnchainFeeEstimator {
 	pub(crate) fn new() -> Self {
 		let fee_rate_cache = RwLock::new(HashMap::new());
-		Self { fee_rate_cache, closing_fee_floor_sat_per_kw: RwLock::new(None) }
+		// Default to FEERATE_FLOOR (253 sat/kw) for cooperative close on mobile.
+		// Builder.setClosingFeeFloorSatPerKw() can override.
+		Self { fee_rate_cache, closing_fee_floor_sat_per_kw: RwLock::new(Some(FEERATE_FLOOR_SATS_PER_KW)) }
 	}
 
 	/// Set the minimum closing fee rate (sat/kw) for cooperative channel closes.
