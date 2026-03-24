@@ -62,6 +62,7 @@ interface Builder {
 	void set_async_payments_role(AsyncPaymentsRole? role);
 	void set_wallet_recovery_mode();
 	void set_wallet_birthday_height(u32 height);
+	void set_closing_fee_floor_sat_per_kw(u32 sat_per_kw);
 	[Throws=BuildError]
 	Node build(NodeEntropy node_entropy);
 	[Throws=BuildError]
