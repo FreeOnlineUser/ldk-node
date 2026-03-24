@@ -251,6 +251,8 @@ pub struct NodeBuilder {
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	recovery_mode: bool,
 	wallet_birthday_height: Option<u32>,
+	/// Optional minimum feerate (sat/kw) for cooperative close. 253 = relay minimum.
+	closing_fee_floor_sat_per_kw: Option<u32>,
 }
 
 impl NodeBuilder {
@@ -270,6 +272,7 @@ impl NodeBuilder {
 		let pathfinding_scores_sync_config = None;
 		let recovery_mode = false;
 		let wallet_birthday_height = None;
+		let closing_fee_floor_sat_per_kw = None;
 		Self {
 			config,
 			chain_data_source_config,
@@ -281,6 +284,7 @@ impl NodeBuilder {
 			pathfinding_scores_sync_config,
 			recovery_mode,
 			wallet_birthday_height,
+			closing_fee_floor_sat_per_kw,
 		}
 	}
 
@@ -582,6 +586,18 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Sets the minimum feerate (sat/kw) for cooperative channel close negotiation.
+	///
+	/// When set, overrides the fee estimator's `ChannelCloseMinimum` target.
+	/// Use `253` (relay minimum) to accept almost any peer's closing fee proposal,
+	/// avoiding force-closes over minor fee disagreements.
+	///
+	/// Default: `None` (use the fee estimator, typically 1+ sat/vB).
+	pub fn set_closing_fee_floor_sat_per_kw(&mut self, sat_per_kw: u32) -> &mut Self {
+		self.closing_fee_floor_sat_per_kw = Some(sat_per_kw);
+		self
+	}
+
 	/// Sets the wallet birthday height for recovery.
 	///
 	/// When set, the on-chain wallet will start scanning from the given block height
@@ -771,6 +787,7 @@ impl NodeBuilder {
 			self.async_payments_role,
 			self.recovery_mode,
 			self.wallet_birthday_height,
+			self.closing_fee_floor_sat_per_kw,
 			seed_bytes,
 			runtime,
 			logger,
@@ -1029,6 +1046,13 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_wallet_recovery_mode();
 	}
 
+	/// Sets the minimum feerate (sat/kw) for cooperative channel close.
+	///
+	/// See [`NodeBuilder::set_closing_fee_floor_sat_per_kw`] for details.
+	pub fn set_closing_fee_floor_sat_per_kw(&self, sat_per_kw: u32) {
+		self.inner.write().unwrap().set_closing_fee_floor_sat_per_kw(sat_per_kw);
+	}
+
 	/// Sets the wallet birthday height for recovery on pruned nodes.
 	///
 	/// See [`NodeBuilder::set_wallet_birthday_height`] for details.
@@ -1191,7 +1215,8 @@ fn build_with_store_internal(
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool,
-	wallet_birthday_height: Option<u32>, seed_bytes: [u8; 64],
+	wallet_birthday_height: Option<u32>, closing_fee_floor_sat_per_kw: Option<u32>,
+	seed_bytes: [u8; 64],
 	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
@@ -1224,6 +1249,9 @@ fn build_with_store_internal(
 
 	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
 	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
+	if let Some(floor) = closing_fee_floor_sat_per_kw {
+		fee_estimator.set_closing_fee_floor(floor);
+	}
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);

@@ -36,12 +36,22 @@ impl From<LdkConfirmationTarget> for ConfirmationTarget {
 
 pub(crate) struct OnchainFeeEstimator {
 	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
+	/// Optional override for ChannelCloseMinimum feerate (sat/kw).
+	/// When set, cooperative close uses this floor instead of the fee estimator.
+	/// Default: None (use fee estimator). Set to 253 for maximum flexibility.
+	closing_fee_floor_sat_per_kw: RwLock<Option<u32>>,
 }
 
 impl OnchainFeeEstimator {
 	pub(crate) fn new() -> Self {
 		let fee_rate_cache = RwLock::new(HashMap::new());
-		Self { fee_rate_cache }
+		Self { fee_rate_cache, closing_fee_floor_sat_per_kw: RwLock::new(None) }
+	}
+
+	/// Set the minimum closing fee rate (sat/kw) for cooperative channel closes.
+	/// Use 253 (relay minimum) to accept any peer's closing fee proposal.
+	pub(crate) fn set_closing_fee_floor(&self, sat_per_kw: u32) {
+		*self.closing_fee_floor_sat_per_kw.write().unwrap() = Some(sat_per_kw);
 	}
 
 	// Updates the fee rate cache and returns if the new values changed.
@@ -60,6 +70,13 @@ impl OnchainFeeEstimator {
 
 impl FeeEstimator for OnchainFeeEstimator {
 	fn estimate_fee_rate(&self, confirmation_target: ConfirmationTarget) -> FeeRate {
+		// Use closing fee floor override for cooperative close minimum
+		if let ConfirmationTarget::Lightning(LdkConfirmationTarget::ChannelCloseMinimum) = confirmation_target {
+			if let Some(floor) = *self.closing_fee_floor_sat_per_kw.read().unwrap() {
+				return FeeRate::from_sat_per_kwu(floor as u64);
+			}
+		}
+
 		let locked_fee_rate_cache = self.fee_rate_cache.read().unwrap();
 
 		let fallback_sats_kwu = get_fallback_rate_for_target(confirmation_target);
