@@ -21,12 +21,12 @@ use lightning::util::ser::Writeable;
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::http::{HttpClientError, JsonResponse};
 use lightning_block_sync::init::{synchronize_listeners, validate_best_block_header};
-use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
+use lightning_block_sync::poll::{ChainPoller, ChainTip, Poll, ValidatedBlockHeader};
 use lightning_block_sync::rest::RestClient;
 use lightning_block_sync::rpc::{RpcClient, RpcClientError};
 use lightning_block_sync::{
-	BlockData, BlockHeaderData, BlockSource, BlockSourceError, BlockSourceErrorKind, Cache,
-	SpvClient,
+	BlockData, BlockHeaderData, BlockSource, BlockSourceError, BlockSourceErrorKind,
+	BlockSourceResult, Cache, SpvClient,
 };
 use serde::Serialize;
 
@@ -124,6 +124,42 @@ impl BitcoindChainSource {
 		self.api_client.utxo_source()
 	}
 
+	/// Fills `walked` with the headers from the current tip back to `down_to`, fetching only
+	/// those not already held, with the same checks `ChainPoller` applies.
+	async fn walk_back_headers(
+		&self, walked: &mut HashMap<BlockHash, ValidatedBlockHeader>, cache: &BoundedHeaderCache,
+		down_to: u32,
+	) -> BlockSourceResult<()> {
+		let best = validate_best_block_header(self.api_client.as_ref()).await?;
+		if best.height.saturating_sub(down_to) <= MAX_HEADER_CACHE_ENTRIES as u32 {
+			return Ok(());
+		}
+		let poller = ChainPoller::new(self.api_client.as_ref(), self.config.network);
+		let mut current = best;
+		let mut fetched = 0;
+		while current.height > down_to {
+			let prev_hash = current.header.prev_blockhash;
+			current = match walked.get(&prev_hash).or_else(|| cache.look_up(&prev_hash)) {
+				Some(header) => *header,
+				None => {
+					let header = poller.look_up_previous_header(&current).await?;
+					walked.insert(prev_hash, header);
+					fetched += 1;
+					header
+				},
+			};
+		}
+		if fetched > 0 {
+			log_info!(
+				self.logger,
+				"Cached {} headers back to height {} for the initial sync",
+				fetched,
+				down_to
+			);
+		}
+		Ok(())
+	}
+
 	pub(super) async fn continuously_sync_wallets(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
@@ -145,6 +181,11 @@ impl BitcoindChainSource {
 
 		let mut backoff = CHAIN_POLLING_INTERVAL_SECS;
 		const MAX_BACKOFF_SECS: u64 = 300;
+
+		// Headers between the tip and the oldest listener, kept across retries. The shared
+		// header cache holds only the last 100, so without this every retry walks the
+		// whole gap again, one RPC per header (minutes for a wallet weeks behind).
+		let mut walked_headers: HashMap<BlockHash, ValidatedBlockHeader> = HashMap::new();
 
 		loop {
 			// if the stop_sync_sender has been dropped, we should just exit
@@ -182,12 +223,39 @@ impl BitcoindChainSource {
 				));
 			}
 
+			let oldest_listener_height = [
+				channel_manager.current_best_block().height,
+				output_sweeper.current_best_block().height,
+				onchain_wallet.current_best_block().height,
+			]
+			.into_iter()
+			.chain(
+				chain_monitor
+					.list_monitors()
+					.iter()
+					.flat_map(|channel_id| chain_monitor.get_monitor(*channel_id))
+					.map(|m| m.current_best_block().height),
+			)
+			.min()
+			.unwrap_or(0);
+
 			let mut locked_header_cache = self.header_cache.lock().await;
+			// A failure here is left for synchronize_listeners to hit and report.
+			let _ = self
+				.walk_back_headers(
+					&mut walked_headers,
+					&*locked_header_cache,
+					oldest_listener_height,
+				)
+				.await;
 			let now = SystemTime::now();
 			match synchronize_listeners(
 				self.api_client.as_ref(),
 				self.config.network,
-				&mut *locked_header_cache,
+				&mut WalkedHeaderCache {
+					inner: &mut *locked_header_cache,
+					walked: &walked_headers,
+				},
 				chain_listeners.clone(),
 			)
 			.await
@@ -260,6 +328,8 @@ impl BitcoindChainSource {
 				},
 			}
 		}
+
+		drop(walked_headers);
 
 		// Now propagate the initial result to unblock waiting subscribers.
 		self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(Ok(()));
@@ -1388,6 +1458,27 @@ impl Cache for BoundedHeaderCache {
 	fn block_disconnected(&mut self, block_hash: &BlockHash) -> Option<ValidatedBlockHeader> {
 		self.recently_seen.retain(|e| e != block_hash);
 		self.header_map.remove(block_hash)
+	}
+}
+
+/// The shared header cache plus the headers walked during initial sync. Connects and
+/// disconnects go to the shared cache; the walked set is read-only.
+struct WalkedHeaderCache<'a> {
+	inner: &'a mut BoundedHeaderCache,
+	walked: &'a HashMap<BlockHash, ValidatedBlockHeader>,
+}
+
+impl Cache for WalkedHeaderCache<'_> {
+	fn look_up(&self, block_hash: &BlockHash) -> Option<&ValidatedBlockHeader> {
+		self.inner.look_up(block_hash).or_else(|| self.walked.get(block_hash))
+	}
+
+	fn block_connected(&mut self, block_hash: BlockHash, block_header: ValidatedBlockHeader) {
+		self.inner.block_connected(block_hash, block_header)
+	}
+
+	fn block_disconnected(&mut self, block_hash: &BlockHash) -> Option<ValidatedBlockHeader> {
+		self.inner.block_disconnected(block_hash)
 	}
 }
 

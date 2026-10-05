@@ -1540,6 +1540,14 @@ fn build_with_store_internal(
 				}
 			}
 			// else: recovery_mode without birthday — sync from genesis (original behavior)
+
+			// Persist the checkpoint now. Otherwise it only reaches the store with the first
+			// connected block, and a restart before then reloads a genesis-only wallet, which
+			// ignores the birthday because the wallet already exists.
+			wallet.persist(&mut wallet_persister).map_err(|e| {
+				log_error!(logger, "Failed to persist new wallet checkpoint: {}", e);
+				BuildError::WalletSetupFailed
+			})?;
 			wallet
 		},
 	};
