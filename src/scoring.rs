@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use lightning::routing::scoring::ChannelLiquidities;
 use lightning::util::ser::Readable;
@@ -56,7 +56,7 @@ async fn sync_external_scores(
 	kv_store: Arc<DynStore>, url: &String, socks5_proxy: Option<&str>,
 ) -> () {
 	let mut request = bitreq::get(url)
-		.with_timeout(EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS)
+		.with_timeout(Duration::from_secs(EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS))
 		.with_max_body_size(Some(EXTERNAL_PATHFINDING_SCORES_MAX_SIZE));
 	if let Some(proxy_addr) = socks5_proxy {
 		if let Ok(proxy) = bitreq::Proxy::new_socks5(proxy_addr) {

@@ -7,6 +7,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use lightning_block_sync::gossip::GossipVerifier;
 
@@ -72,7 +73,7 @@ impl GossipSource {
 
 				let mut query = bitreq::get(query_url)
 					.with_max_body_size(Some(RGS_SNAPSHOT_MAX_SIZE))
-					.with_timeout(RGS_SYNC_TIMEOUT_SECS);
+					.with_timeout(Duration::from_secs(RGS_SYNC_TIMEOUT_SECS));
 				if let Some(proxy_addr) = socks5_proxy {
 					if let Ok(proxy) = bitreq::Proxy::new_socks5(proxy_addr) {
 						query = query.with_proxy(proxy);
