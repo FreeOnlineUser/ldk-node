@@ -165,6 +165,57 @@ impl Wallet {
 		}
 	}
 
+	/// Rebuilds a wallet from the blocks that hold its unspent coins, instead of every
+	/// block since its birthday.
+	///
+	/// Meant for a fresh wallet whose checkpoint is at the chain tip, on a pruned node
+	/// where the blocks back to the birthday are gone. The caller finds the coins in
+	/// bitcoind's UTXO set and passes the blocks they were confirmed in. Each block is
+	/// added under the tip with the wallet's transactions in it, so the balance is
+	/// right without replaying the chain. Transactions whose outputs have all been
+	/// spent are not in any of these blocks and so stay missing from the history.
+	///
+	/// `external_index` and `internal_index` are the highest derivation indices among
+	/// the coins, revealed first so outputs past the lookahead are recognised.
+	///
+	/// Returns how many wallet transactions were found.
+	pub(crate) fn restore_from_blocks(
+		&self, mut blocks: Vec<(u32, bitcoin::Block)>, external_index: u32, internal_index: u32,
+	) -> Result<u32, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		let _ = locked_wallet.reveal_addresses_to(KeychainKind::External, external_index).count();
+		let _ = locked_wallet.reveal_addresses_to(KeychainKind::Internal, internal_index).count();
+
+		let tip = locked_wallet.latest_checkpoint().block_id();
+		blocks.sort_by_key(|(height, _)| *height);
+		let mut found = 0u32;
+		for (height, block) in blocks {
+			if height == 0 || height >= tip.height {
+				log_error!(self.logger, "Restore block at height {} is not below the tip {}", height, tip.height);
+				return Err(Error::WalletOperationFailed);
+			}
+			let (update, count) = restore_update(&locked_wallet, height, &block, tip)
+				.ok_or(Error::WalletOperationFailed)?;
+			found += count;
+			let events = locked_wallet.apply_update_events(update).map_err(|e| {
+				log_error!(self.logger, "Failed to apply restore block {}: {}", height, e);
+				Error::WalletOperationFailed
+			})?;
+			self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
+				log_error!(self.logger, "Failed to update payment store: {}", e);
+				Error::PersistenceFailed
+			})?;
+		}
+
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+		log_info!(self.logger, "Restored on-chain wallet from coin blocks: {} transactions", found);
+		Ok(found)
+	}
+
 	pub(crate) fn apply_mempool_txs(
 		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
@@ -1712,6 +1763,30 @@ impl ChangeDestinationSource for WalletKeysManager {
 // FIXME/TODO: This is copied-over from bdk_wallet and only used to generate `WalletEvent`s after
 // applying mempool transactions. We should drop this when BDK offers to generate events for
 // mempool transactions natively.
+/// The wallet update for one block of [`Wallet::restore_from_blocks`]: the block under
+/// `tip` in the chain, with the transactions in it that pay the wallet. None if the
+/// block doesn't fit below the tip.
+fn restore_update(
+	wallet: &bdk_wallet::Wallet, height: u32, block: &bitcoin::Block, tip: bdk_chain::BlockId,
+) -> Option<(Update, u32)> {
+	let this = bdk_chain::BlockId { height, hash: block.block_hash() };
+	let prev = bdk_chain::BlockId { height: height.checked_sub(1)?, hash: block.header.prev_blockhash };
+	// The update must contain the tip to connect without displacing it.
+	let chain = bdk_chain::CheckPoint::from_block_ids([prev, this, tip]).ok()?;
+	let anchor =
+		bdk_chain::ConfirmationBlockTime { block_id: this, confirmation_time: block.header.time as u64 };
+	let mut tx_update = bdk_chain::TxUpdate::default();
+	let mut count = 0;
+	for tx in &block.txdata {
+		if tx.output.iter().any(|o| wallet.is_mine(o.script_pubkey.clone())) {
+			tx_update.anchors.insert((anchor, tx.compute_txid()));
+			tx_update.txs.push(Arc::new(tx.clone()));
+			count += 1;
+		}
+	}
+	Some((Update { chain: Some(chain), tx_update, ..Default::default() }, count))
+}
+
 pub(crate) fn wallet_events(
 	wallet: &mut bdk_wallet::Wallet, chain_tip1: bdk_chain::BlockId,
 	chain_tip2: bdk_chain::BlockId,
@@ -1809,4 +1884,82 @@ pub(crate) fn wallet_events(
 	});
 
 	events
+}
+
+#[cfg(test)]
+mod restore_tests {
+	use super::*;
+	use bitcoin::block::{Header, Version};
+	use bitcoin::hashes::Hash;
+	use bitcoin::{absolute, transaction, Amount, BlockHash, CompactTarget, Network, TxMerkleNode, TxOut};
+
+	const EXT: &str = "wpkh(tprv8ZgxMBicQKsPd3krDUsBAmtnRsK3rb8u5yi1zhQgMhF1tR8MW7xfE4rnrbbsrbPR52e7rKapu6ztw1jXveJSCGHEriUGZV7mCe88duLp5pj/84'/1'/0'/0/*)";
+	const INT: &str = "wpkh(tprv8ZgxMBicQKsPd3krDUsBAmtnRsK3rb8u5yi1zhQgMhF1tR8MW7xfE4rnrbbsrbPR52e7rKapu6ztw1jXveJSCGHEriUGZV7mCe88duLp5pj/84'/1'/0'/1/*)";
+
+	fn hash(n: u8) -> BlockHash {
+		BlockHash::from_byte_array([n; 32])
+	}
+
+	fn block_paying(prev: BlockHash, script: bitcoin::ScriptBuf, sats: u64) -> bitcoin::Block {
+		let pay = Transaction {
+			version: transaction::Version::TWO,
+			lock_time: absolute::LockTime::ZERO,
+			input: vec![],
+			output: vec![TxOut { value: Amount::from_sat(sats), script_pubkey: script }],
+		};
+		let other = Transaction {
+			version: transaction::Version::TWO,
+			lock_time: absolute::LockTime::ZERO,
+			input: vec![],
+			output: vec![TxOut { value: Amount::from_sat(7), script_pubkey: bitcoin::ScriptBuf::new() }],
+		};
+		let header = Header {
+			version: Version::TWO,
+			prev_blockhash: prev,
+			merkle_root: TxMerkleNode::all_zeros(),
+			time: 1_700_000_000,
+			bits: CompactTarget::from_consensus(0x207fffff),
+			nonce: 0,
+		};
+		bitcoin::Block { header, txdata: vec![other, pay] }
+	}
+
+	#[test]
+	fn restores_coins_below_the_tip() {
+		let mut wallet = bdk_wallet::Wallet::create(EXT, INT)
+			.network(Network::Regtest)
+			.create_wallet_no_persist()
+			.unwrap();
+		let tip = bdk_chain::BlockId { height: 1000, hash: hash(100) };
+		let cp = wallet.latest_checkpoint().insert(tip);
+		wallet.apply_update(Update { chain: Some(cp), ..Default::default() }).unwrap();
+
+		// A coin far past the lookahead, and one on the change keychain.
+		let _ = wallet.reveal_addresses_to(KeychainKind::External, 60).count();
+		let far = wallet.peek_address(KeychainKind::External, 60).script_pubkey();
+		let change = wallet.peek_address(KeychainKind::Internal, 3).script_pubkey();
+		let blocks = [(500u32, block_paying(hash(49), far, 40_000)), (700, block_paying(hash(69), change, 30_000))];
+
+		let mut found = 0;
+		for (height, block) in &blocks {
+			let (update, count) = restore_update(&wallet, *height, block, tip).unwrap();
+			found += count;
+			wallet.apply_update(update).unwrap();
+		}
+
+		assert_eq!(found, 2);
+		assert_eq!(wallet.latest_checkpoint().block_id(), tip);
+		assert_eq!(wallet.balance().confirmed, Amount::from_sat(70_000));
+	}
+
+	#[test]
+	fn rejects_a_block_at_the_tip() {
+		let wallet = bdk_wallet::Wallet::create(EXT, INT)
+			.network(Network::Regtest)
+			.create_wallet_no_persist()
+			.unwrap();
+		let tip = bdk_chain::BlockId { height: 1000, hash: hash(100) };
+		let block = block_paying(hash(1), bitcoin::ScriptBuf::new(), 1);
+		assert!(restore_update(&wallet, 1001, &block, tip).is_none());
+	}
 }

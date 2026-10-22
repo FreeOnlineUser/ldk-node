@@ -2082,6 +2082,35 @@ impl Node {
 		watchtower::export_monitors(&self.chain_monitor, &self.logger)
 	}
 
+	/// Rebuilds the on-chain wallet from the blocks holding its unspent coins.
+	///
+	/// For a new wallet whose birthday was set to the chain tip: pass the raw blocks
+	/// (consensus-encoded) and their heights in which the wallet's current coins were
+	/// confirmed, found by scanning the UTXO set, plus the highest derivation index
+	/// seen on each keychain. Only works before [`Node::start`]. History of coins
+	/// already spent is not recovered; a full rescan from the birthday restores it.
+	///
+	/// Returns the number of wallet transactions found.
+	pub fn restore_onchain_wallet_from_blocks(
+		&self, blocks: Vec<Vec<u8>>, heights: Vec<u32>, external_index: u32, internal_index: u32,
+	) -> Result<u32, Error> {
+		if *self.is_running.read().unwrap() {
+			return Err(Error::AlreadyRunning);
+		}
+		if blocks.len() != heights.len() {
+			return Err(Error::WalletOperationFailed);
+		}
+		let mut decoded = Vec::with_capacity(blocks.len());
+		for (raw, height) in blocks.iter().zip(heights) {
+			let block: bitcoin::Block = bitcoin::consensus::deserialize(raw).map_err(|e| {
+				log_error!(self.logger, "Could not decode restore block at {}: {}", height, e);
+				Error::WalletOperationFailed
+			})?;
+			decoded.push((height, block));
+		}
+		self.wallet.restore_from_blocks(decoded, external_index, internal_index)
+	}
+
 	/// Drains all ready justice blobs captured since the last call.
 	///
 	/// Each blob contains fully-formed justice data: breach txid (encryption key),

@@ -202,7 +202,7 @@ mod tests {
 	fn build_auth(seed: [u8; 32]) -> LnurlAuth {
 		let logger = Arc::new(Logger::new_log_facade());
 		let xprv = Xpriv::new_master(Network::Bitcoin, &seed).unwrap();
-		LnurlAuth::new(xprv, logger)
+		LnurlAuth::new(xprv, logger, None)
 	}
 
 	/// Build an LnurlAuth from a base xprv that is already at m/138'.
@@ -213,7 +213,7 @@ mod tests {
 		let hashing_key = hashing_key_xprv.private_key.secret_bytes();
 		let logger = Arc::new(Logger::new_log_facade());
 		let client = Client::new(2);
-		LnurlAuth { lnurl_auth_base_xprv: base_xprv, hashing_key, client, logger, secp }
+		LnurlAuth { lnurl_auth_base_xprv: base_xprv, hashing_key, client, logger, secp, socks5_proxy: None }
 	}
 
 	#[test]

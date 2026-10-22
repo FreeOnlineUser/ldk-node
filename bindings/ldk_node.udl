@@ -147,6 +147,8 @@ interface Node {
 	sequence<WatchtowerMonitorInfo> watchtower_list_monitors();
 	[Throws=NodeError]
 	sequence<WatchtowerMonitorData> watchtower_export_monitors();
+	[Throws=NodeError]
+	u32 restore_onchain_wallet_from_blocks(sequence<bytes> blocks, sequence<u32> heights, u32 external_index, u32 internal_index);
 	sequence<WatchtowerJusticeBlob> watchtower_drain_justice_blobs();
 	void watchtower_set_sweep_address(bytes address);
 	sequence<PaymentPathInfo> payment_path_attempts();
