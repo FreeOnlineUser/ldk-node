@@ -126,6 +126,21 @@ impl OnchainPayment {
 		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
 	}
 
+	/// Returns the amount [`Self::send_all_to_address`] with `retain_reserves` set to `false`
+	/// would send at `fee_rate`: all spendable funds less the fee. With no `address` the
+	/// estimate assumes a P2WPKH output. Nothing is signed or broadcast.
+	pub fn estimate_send_all_amount(
+		&self, address: Option<bitcoin::Address>, fee_rate: FeeRate,
+	) -> Result<u64, Error> {
+		#[cfg(feature = "uniffi")]
+		let fee_rate = *fee_rate;
+		let script = match address {
+			Some(address) => address.script_pubkey(),
+			None => bitcoin::ScriptBuf::new_p2wpkh(&<bitcoin::WPubkeyHash as bitcoin::hashes::Hash>::all_zeros()),
+		};
+		self.wallet.get_max_send_all_amount(script, fee_rate)
+	}
+
 	/// Attempt to bump the fee of an unconfirmed transaction using Replace-by-Fee (RBF).
 	///
 	/// This creates a new transaction that replaces the original one, increasing the fee by the

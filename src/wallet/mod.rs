@@ -713,6 +713,19 @@ impl Wallet {
 		Ok(max_amount)
 	}
 
+	/// The amount a drain of the whole wallet to `drain_script` would send at `fee_rate`, with
+	/// no anchor reserve kept back: what `send_to_address` with
+	/// [`OnchainSendAmount::AllDrainingReserve`] sends. The draft transaction is discarded.
+	pub(crate) fn get_max_send_all_amount(
+		&self, drain_script: ScriptBuf, fee_rate: FeeRate,
+	) -> Result<u64, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		let (max_amount, tmp_psbt) =
+			self.get_max_drain_amount(&mut locked_wallet, drain_script, 0, fee_rate, None)?;
+		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+		Ok(max_amount)
+	}
+
 	/// Returns the maximum amount available for splicing into an existing channel, accounting for
 	/// on-chain fees and anchor reserves, along with the wallet UTXOs to use as inputs.
 	pub(crate) fn get_max_splice_in_amount(
